@@ -1,6 +1,5 @@
 // src/simulation/engine.ts
 // Offline-first: life-like schedules + dwell + flow recording
-import { buildPath, advanceAlongPath } from '@/simulation/pathUtils';
 
 import {
   ASTON_BBOX,
