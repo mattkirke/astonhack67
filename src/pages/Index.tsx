@@ -13,17 +13,15 @@ export default function Index() {
     resume,
     reset,
     setSpeed,
-    toggleRoutes,
+    toggleCorridors,
+    toggleFlow,
     selectAgent,
     clearGeneratedRoutes,
-    loadTfwmNetwork,
     generateFromFlow,
   } = useSimulation();
 
   // Auto-load TfWM stops on page load (optional)
-  useEffect(() => {
-    loadTfwmNetwork(3500).catch(err => console.error('Failed to load TfWM network:', err));
-  }, [loadTfwmNetwork]);
+
 
   const handleGenerateRoute = useCallback(() => {
     generateFromFlow();
@@ -33,15 +31,17 @@ export default function Index() {
     <div className="flex h-screen w-screen overflow-hidden">
       <div className="flex-1 relative">
         <SimulationMap
-          agents={state.agents}
-          vehicles={state.vehicles}
-          showRoutes={state.showRoutes}
-          generatedRoutes={state.generatedRoutes}
-          selectedAgentId={state.selectedAgentId}
-          onSelectAgent={selectAgent}
-          baseRoutes={[]}                 // Skyline: no preset bus lines
-          stops={state.networkStops as any} // show TfWM stops
-        />
+  agents={state.agents}
+  vehicles={state.vehicles}
+  showFlow={(state as any).showFlow}
+  showCorridors={(state as any).showCorridors}
+  generatedRoutes={state.generatedRoutes}
+  selectedAgentId={state.selectedAgentId}
+  onSelectAgent={selectAgent}
+  baseRoutes={[]}
+  stops={state.networkStops as any}
+/>
+
       </div>
 
       <ControlPanel
@@ -51,7 +51,8 @@ export default function Index() {
         onResume={resume}
         onReset={reset}
         onSetSpeed={setSpeed}
-        onToggleRoutes={toggleRoutes}
+        onToggleFlow={toggleFlow}
+        onToggleCorridors={toggleCorridors}
         onGenerateRoute={handleGenerateRoute}
         onClearRoutes={clearGeneratedRoutes}
       />

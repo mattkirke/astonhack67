@@ -1,9 +1,8 @@
 // src/hooks/useSimulation.ts
-// Step 9: Before/After analysis snapshots (Skyline demo narrative)
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Agent, SimulationMetrics, BusRoute, BusStop } from '@/types/simulation';
-import { BUS_STOPS, ASTON_CENSUS } from '@/data/astonData';
+import type { Agent, SimulationMetrics, BusRoute } from '@/types/simulation';
+import { ASTON_CENSUS, buildCity, randomHomeLocation, BUS_STOPS } from '@/data/astonData';
 import {
   createAgents,
   stepSimulation,
@@ -30,14 +29,6 @@ const EMPTY_METRICS: SimulationMetrics = {
   accessibilityCoverage: 0,
 };
 
-async function fetchTfwmNetwork(bufferMeters = 3500) {
-  const res = await fetch(`http://127.0.0.1:8000/api/network?bufferMeters=${bufferMeters}`);
-  if (!res.ok) throw new Error('Failed to load TfWM network');
-  return res.json();
-}
-
-const DEFAULT_SIM_MINUTES = 6 * 60; // 06:00 -> 12:00 window
-
 type AnalysisSnapshot = {
   minute: number;
   edges: number;
@@ -51,12 +42,12 @@ type ProposalSnapshot = {
   minute: number;
   routesCount: number;
   routeKm: number;
-  demandCapturedPct: number; // 0..100
+  demandCapturedPct: number;
   demandCapturedTraversals: number;
-  efficiency: number; // traversals per route-km
+  efficiency: number;
 };
 
-function computeFlowSummary(minute: number) {
+function computeFlowSummary() {
   const edges = getFlowEdges();
   const hourly = Array(24).fill(0);
   let totalTraversals = 0;
@@ -67,19 +58,15 @@ function computeFlowSummary(minute: number) {
   }
 
   const peakHour = hourly.reduce((bestH, v, h) => (v > hourly[bestH] ? h : bestH), 0);
-
   return { edgesCount: edges.length, totalTraversals, peakHour };
 }
 
 function routeLengthKm(geometry: [number, number][]) {
   let sum = 0;
   for (let i = 0; i < geometry.length - 1; i++) {
-    // We can’t import haversine from data here safely without causing circulars,
-    // so approximate using a cheap fallback: treat as haversine-ish via engine’s existing flow graph
-    // BUT we *can* do a simple equirectangular approximation in degrees.
     const [lat1, lon1] = geometry[i];
     const [lat2, lon2] = geometry[i + 1];
-    const R = 6371; // km
+    const R = 6371;
     const x = ((lon2 - lon1) * Math.PI / 180) * Math.cos(((lat1 + lat2) / 2) * Math.PI / 180);
     const y = ((lat2 - lat1) * Math.PI / 180);
     sum += Math.sqrt(x * x + y * y) * R;
@@ -98,7 +85,6 @@ function computeDemandCapturedByRoutes(generatedRoutes: BusRoute[]) {
   }
 
   let captured = 0;
-
   for (const r of generatedRoutes) {
     if (!r.stopIds || r.stopIds.length < 2) continue;
     for (let i = 0; i < r.stopIds.length - 1; i++) {
@@ -106,11 +92,8 @@ function computeDemandCapturedByRoutes(generatedRoutes: BusRoute[]) {
     }
   }
 
-  // Captured can double-count if routes overlap; clamp at total
   captured = Math.min(captured, totalTraversals);
-
   const pct = totalTraversals > 0 ? (captured / totalTraversals) * 100 : 0;
-
   return { capturedTraversals: captured, totalTraversals, capturedPct: pct };
 }
 
@@ -127,15 +110,15 @@ export function useSimulation() {
     isRunning: false,
     isPaused: false,
     speed: 1,
-    showRoutes: true,
+    showFlow: true,
+    showCorridors: true,
     selectedAgentId: null,
 
     metrics: EMPTY_METRICS,
 
     simStartMinute: 6 * 60,
-    simDurationMinutes: DEFAULT_SIM_MINUTES,
+    simDurationMinutes: 16 * 60,
 
-    // Step 9 analysis snapshots
     analysis: {
       baseline: null as AnalysisSnapshot | null,
       proposal: null as ProposalSnapshot | null,
@@ -144,32 +127,30 @@ export function useSimulation() {
 
   const timerRef = useRef<number | null>(null);
 
-  const loadTfwmNetwork = useCallback(async (bufferMeters = 3500) => {
-    const net = await fetchTfwmNetwork(bufferMeters);
-
-    const stops: BusStop[] = (net.stops ?? [])
-      .map((s: any) => ({
-        id: String(s.id),
-        name: String(s.name ?? s.id),
-        location: [Number(s.lat), Number(s.lng)] as [number, number],
-      }))
-      .filter(s => Number.isFinite(s.location[0]) && Number.isFinite(s.location[1]));
-
-    setState((prev: any) => ({
-      ...prev,
-      networkStops: stops.length ? stops : BUS_STOPS,
-      networkLoaded: stops.length > 0,
-    }));
-  }, []);
-
   const start = useCallback(() => {
+    const seed = 1337; // change if you want different city “days”
     const agentCount = Math.min(800, ASTON_CENSUS.totalPopulation);
-    const agents = createAgents(agentCount);
+
+    const city = buildCity(seed, { poiCount: 500, stopCount: 80 });
+    const pois = city.pois;
+    const stops = city.stops;
+
+    console.log('[SIM] city seed', seed, 'POIs', pois.length, 'Stops', stops.length);
+
+    console.log("POIs in use:", pois.length);
+
+    console.log(pois.map(p => p.name));
+
+
+    const agents = createAgents(agentCount, pois, () => randomHomeLocation(seed));
 
     clearFlow();
 
     setState((prev: any) => ({
       ...prev,
+      networkStops: stops,
+      networkLoaded: true,
+
       agents,
       vehicles: [],
       generatedRoutes: [],
@@ -210,10 +191,9 @@ export function useSimulation() {
       setState((prev: any) => {
         const endMinute = prev.simStartMinute + prev.simDurationMinutes;
 
-        // Auto-pause + snapshot baseline once
         if (prev.currentMinute >= endMinute) {
           if (!prev.analysis?.baseline) {
-            const flow = computeFlowSummary(prev.currentMinute);
+            const flow = computeFlowSummary();
             const baseline: AnalysisSnapshot = {
               minute: prev.currentMinute,
               edges: flow.edgesCount,
@@ -222,18 +202,14 @@ export function useSimulation() {
               totalCO2: prev.metrics.totalCO2,
               totalDistanceKm: prev.metrics.totalDistance,
             };
-            return {
-              ...prev,
-              isPaused: true,
-              analysis: { ...prev.analysis, baseline },
-            };
+            return { ...prev, isPaused: true, analysis: { ...prev.analysis, baseline } };
           }
           return { ...prev, isPaused: true };
         }
 
         const result = stepSimulation(prev.agents, [], prev.currentMinute, [], prev.networkStops);
 
-        const agents: Agent[] = result.agents.map(a => ({
+        const agents: Agent[] = result.agents.map((a: Agent) => ({
           ...a,
           currentLocation: [a.currentLocation[0], a.currentLocation[1]] as [number, number],
         }));
@@ -258,7 +234,16 @@ export function useSimulation() {
   }, [state.isRunning, state.isPaused, state.speed, state.networkStops]);
 
   const setSpeed = useCallback((speed: number) => setState((prev: any) => ({ ...prev, speed })), []);
+  const toggleCorridors = useCallback(
+  () => setState((prev: any) => ({ ...prev, showCorridors: !prev.showCorridors })),
+  []
+);
+
   const toggleRoutes = useCallback(() => setState((prev: any) => ({ ...prev, showRoutes: !prev.showRoutes })), []);
+  const toggleFlow = useCallback(
+  () => setState((prev: any) => ({ ...prev, showFlow: !prev.showFlow })),
+  []
+);
   const selectAgent = useCallback((id: string | null) => setState((prev: any) => ({ ...prev, selectedAgentId: id })), []);
 
   const clearGeneratedRoutes = useCallback(() => {
@@ -269,7 +254,6 @@ export function useSimulation() {
     }));
   }, []);
 
-  // ✅ Step 6 + Step 9: Generate + compute proposal snapshot
   const generateFromFlow = useCallback(() => {
     setState((prev: any) => {
       const routes = generateRoutesFromFlow(prev.networkStops, {
@@ -279,9 +263,8 @@ export function useSimulation() {
         maxStopsPerRoute: 18,
       });
 
-      const { capturedTraversals, totalTraversals, capturedPct } = computeDemandCapturedByRoutes(routes);
-
-      const routeKm = routes.reduce((s, r) => s + (r.geometry ? routeLengthKm(r.geometry as any) : 0), 0);
+      const { capturedTraversals, capturedPct } = computeDemandCapturedByRoutes(routes);
+      const routeKm = routes.reduce((s: number, r: BusRoute) => s + (r.geometry ? routeLengthKm(r.geometry as any) : 0), 0);
       const efficiency = routeKm > 0 ? capturedTraversals / routeKm : 0;
 
       const proposal: ProposalSnapshot = {
@@ -293,11 +276,7 @@ export function useSimulation() {
         efficiency: Math.round(efficiency * 10) / 10,
       };
 
-      return {
-        ...prev,
-        generatedRoutes: routes,
-        analysis: { ...prev.analysis, proposal },
-      };
+      return { ...prev, generatedRoutes: routes, analysis: { ...prev.analysis, proposal } };
     });
   }, []);
 
@@ -308,10 +287,10 @@ export function useSimulation() {
     resume,
     reset,
     setSpeed,
-    toggleRoutes,
     selectAgent,
     clearGeneratedRoutes,
-    loadTfwmNetwork,
     generateFromFlow,
+    toggleFlow,
+    toggleCorridors,
   };
 }

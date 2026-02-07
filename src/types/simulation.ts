@@ -1,8 +1,14 @@
-export type AgentState = 'at_home' | 'walking_to_stop' | 'waiting' | 'riding' | 'walking_to_dest' | 'at_destination';
+export type AgentState =
+  | 'at_home'
+  | 'walking_to_stop'
+  | 'waiting'
+  | 'riding'
+  | 'walking_to_dest'
+  | 'at_destination';
 
 export interface ScheduleEntry {
-  departureMinute: number; // minute of day (0-1439)
-  destination: [number, number]; // [lat, lng]
+  departureMinute: number;
+  destination: [number, number];
   type: 'work' | 'education' | 'shopping' | 'social' | 'home';
   label: string;
 }
@@ -38,10 +44,10 @@ export interface BusRoute {
   id: string;
   name: string;
   stopIds: string[];
-  frequency: number; // minutes between departures
+  frequency: number;
   vehicleCapacity: number;
   color: string;
-  geometry: [number, number][]; // polyline points
+  geometry: [number, number][];
 }
 
 export interface Vehicle {
@@ -52,8 +58,8 @@ export interface Vehicle {
   passengers: string[];
   capacity: number;
   position: [number, number];
-  progress: number; // 0-1 between current and next stop
-  direction: 1 | -1; // 1 = forward, -1 = reverse
+  progress: number;
+  direction: 1 | -1;
 }
 
 export interface SimulationMetrics {
@@ -76,8 +82,8 @@ export interface SimulationMetrics {
 export interface SimulationState {
   isRunning: boolean;
   isPaused: boolean;
-  currentMinute: number; // 0-1439 (minutes in a day)
-  speed: number; // multiplier
+  currentMinute: number;
+  speed: number;
   agents: Agent[];
   vehicles: Vehicle[];
   metrics: SimulationMetrics;
@@ -86,9 +92,20 @@ export interface SimulationState {
   selectedAgentId: string | null;
 }
 
+// ✅ Make POI consistent with astonData.ts categories
+export type POIType =
+  | 'education'
+  | 'employment'
+  | 'retail'
+  | 'healthcare'
+  | 'social'
+  | 'leisure'
+  | 'religious'
+  | 'transport';
+
 export interface POI {
   id: string;
   name: string;
   location: [number, number];
-  type: 'education' | 'healthcare' | 'retail' | 'employment' | 'social' | 'transport';
+  type: POIType;
 }

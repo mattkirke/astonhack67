@@ -46,10 +46,11 @@ type SimpleStop = {
 interface SimulationMapProps {
   agents: Agent[];
   vehicles: Vehicle[];
-  showRoutes: boolean;
   generatedRoutes: BusRoute[];
   selectedAgentId: string | null;
   onSelectAgent: (id: string | null) => void;
+  showFlow: boolean;
+  showCorridors: boolean;
 
   baseRoutes?: BusRoute[];
   stops?: SimpleStop[];
@@ -58,12 +59,13 @@ interface SimulationMapProps {
 export default function SimulationMap({
   agents,
   vehicles,
-  showRoutes,
   generatedRoutes,
   selectedAgentId,
   onSelectAgent,
   baseRoutes,
   stops,
+  showFlow,
+  showCorridors,
 }: SimulationMapProps) {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -141,30 +143,18 @@ export default function SimulationMap({
   }, []);
 
   // Stops layer
-  useEffect(() => {
-    if (!stopsLayerRef.current) return;
-    stopsLayerRef.current.clearLayers();
+ useEffect(() => {
+  if (!stopsLayerRef.current) return;
+  stopsLayerRef.current.clearLayers();
+  return; // ✅ stop markers never added
+}, [effectiveStops]);
 
-    for (const stop of effectiveStops) {
-      if (!stop.location || stop.location.length !== 2) continue;
-
-      L.circleMarker(stop.location, {
-        radius: 4,
-        color: 'hsl(210, 15%, 55%)',
-        weight: 1,
-        fillColor: 'hsl(210, 15%, 30%)',
-        fillOpacity: 0.7,
-      })
-        .bindTooltip(stop.name, { direction: 'top', offset: [0, -8] })
-        .addTo(stopsLayerRef.current);
-    }
-  }, [effectiveStops]);
 
   // ✅ Flow layer (new, Skyline-like)
   useEffect(() => {
     if (!flowLayerRef.current) return;
     flowLayerRef.current.clearLayers();
-    if (!showRoutes) return;
+    if (!showFlow) return;
 
     const flowEdges = getFlowEdges();
     if (!flowEdges.length) return;
@@ -188,13 +178,13 @@ export default function SimulationMap({
         opacity: 0.12 + t * 0.25,
       }).addTo(flowLayerRef.current);
     }
-  }, [showRoutes, stopById, agents]); // agents changes each tick so overlay updates over time
+  }, [showFlow, stopById, agents]); // agents changes each tick so overlay updates over time
 
   // Routes layer (generated corridors)
   useEffect(() => {
     if (!routeLayerRef.current) return;
     routeLayerRef.current.clearLayers();
-    if (!showRoutes) return;
+    if (!showCorridors) return;
 
     const allRoutes = [...effectiveRoutes, ...generatedRoutes];
     if (allRoutes.length === 0) return;
@@ -227,7 +217,7 @@ export default function SimulationMap({
         .bindTooltip(route.name, { sticky: true })
         .addTo(routeLayerRef.current);
     }
-  }, [showRoutes, generatedRoutes, effectiveRoutes, agents]);
+  }, [showCorridors, generatedRoutes, effectiveRoutes, agents]);
 
   // Agents layer
   useEffect(() => {
@@ -277,3 +267,4 @@ export default function SimulationMap({
 
   return <div ref={mapContainerRef} className="w-full h-full" />;
 }
+

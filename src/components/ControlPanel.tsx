@@ -10,10 +10,14 @@ interface ControlPanelProps {
   onResume: () => void;
   onReset: () => void;
   onSetSpeed: (speed: number) => void;
-  onToggleRoutes: () => void;
+
+  onToggleFlow: () => void;
+  onToggleCorridors: () => void;
+
   onGenerateRoute: () => void;
   onClearRoutes: () => void;
 }
+
 
 function formatTime(minute: number): string {
   const h = Math.floor(minute / 60);
@@ -39,22 +43,42 @@ export default function ControlPanel({
   onResume,
   onReset,
   onSetSpeed,
-  onToggleRoutes,
+  onToggleFlow,
+  onToggleCorridors,
   onGenerateRoute,
   onClearRoutes,
 }: ControlPanelProps) {
-  const { metrics, currentMinute, isRunning, isPaused, speed, showRoutes, generatedRoutes, selectedAgentId, agents } = state;
+
+  const {
+    metrics,
+    currentMinute,
+    isRunning,
+    isPaused,
+    speed,
+    generatedRoutes,
+    selectedAgentId,
+    agents,
+  } = state;
+
+  const { showFlow, showCorridors } = state as any;
 
   const selectedAgent = useMemo(() => {
     if (!selectedAgentId) return null;
     return agents.find(a => a.id === selectedAgentId) || null;
   }, [selectedAgentId, agents]);
 
-  const dayProgress = (currentMinute / 1440) * 100;
+  const { simStartMinute, simDurationMinutes } = state as any;
+
+  const dayProgress = Math.max(
+    0,
+    Math.min(100, ((currentMinute - simStartMinute) / simDurationMinutes) * 100)
+  );
 
   const analysis = (state as any).analysis as any | undefined;
   const baseline = analysis?.baseline ?? null;
   const proposal = analysis?.proposal ?? null;
+
+
 
   return (
     <div className="w-[380px] h-screen overflow-y-auto bg-sim-panel border-l border-sim-panel-border flex flex-col">
@@ -150,13 +174,26 @@ export default function ControlPanel({
             <Users className="w-4 h-4 text-primary" />
             Simulation Details
           </h2>
-          <button
-            onClick={onToggleRoutes}
-            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            {showRoutes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            Routes
-          </button>
+          <div className="flex items-center gap-2">
+  <button
+    onClick={onToggleFlow}
+    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+    title="Toggle demand (flow) lines"
+  >
+    {showFlow ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+    Demand
+  </button>
+
+  <button
+    onClick={onToggleCorridors}
+    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+    title="Toggle generated corridors"
+  >
+    {showCorridors ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+    Corridors
+  </button>
+</div>
+
         </div>
 
         <StatRow label="Total Agents" value={metrics.totalAgents} />

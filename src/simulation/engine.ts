@@ -1,62 +1,34 @@
 // src/simulation/engine.ts
-// Step 7: Skyline-like schedules + dwell + boundary-safe destinations
-// Still: flow recording + generate proposed routes from flow
+// Offline-first: life-like schedules + dwell + flow recording
 
-import type { Agent, SimulationMetrics, BusStop, BusRoute } from '@/types/simulation';
 import {
-  CARBON_FACTORS,
-  randomPointInAston,
-  haversineDistance,
+  ASTON_BBOX,
   ASTON_BOUNDARY,
+  haversineDistance,
+  CARBON_FACTORS,
+  clampToAstonBBox,
 } from '@/data/astonData';
 
-// ----------------------------------
-// Safety
-// ----------------------------------
-
-function isValidLocation(loc: any): loc is [number, number] {
-  return (
-    Array.isArray(loc) &&
-    loc.length === 2 &&
-    typeof loc[0] === 'number' &&
-    typeof loc[1] === 'number' &&
-    Number.isFinite(loc[0]) &&
-    Number.isFinite(loc[1])
-  );
-}
-
-function sanitizeStops(stops: BusStop[]): BusStop[] {
-  return stops.filter(s => s && s.id && isValidLocation((s as any).location));
-}
+import type { Agent, SimulationMetrics, BusStop, BusRoute, POI } from '@/types/simulation';
 
 // ----------------------------------
-// Point in polygon (Aston boundary)
+// Point-in-polygon + safe random
 // ----------------------------------
 
 function pointInPolygon(point: [number, number], polygon: [number, number][]) {
-  const [x, y] = point; // lat, lng treated as x,y for ray casting
+  const [x, y] = point;
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
     const xi = polygon[i][0], yi = polygon[i][1];
     const xj = polygon[j][0], yj = polygon[j][1];
-
-    const intersect =
-      yi > y !== yj > y &&
-      x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-12) + xi;
-
+    const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-12) + xi;
     if (intersect) inside = !inside;
   }
   return inside;
 }
 
-function randomPointInAstonSafe(): [number, number] {
-  // Your existing randomPointInAston likely already respects boundary,
-  // but we harden it just in case.
-  for (let i = 0; i < 50; i++) {
-    const p = randomPointInAston();
-    if (pointInPolygon(p, ASTON_BOUNDARY as any)) return p;
-  }
-  return randomPointInAston();
+function inBoundary(p: [number, number]) {
+  return pointInPolygon(p, ASTON_BOUNDARY as any);
 }
 
 // ----------------------------------
@@ -135,7 +107,6 @@ function stopsKey(stops: BusStop[]) {
 function getGraph(stops: BusStop[]) {
   const key = stopsKey(stops);
   if (key === GRAPH_KEY && GRAPH_CACHE) return GRAPH_CACHE;
-
   GRAPH_KEY = key;
   GRAPH_CACHE = buildTransitGraph(stops, 14);
   PATH_CACHE = new Map();
@@ -205,10 +176,6 @@ function shortestPath(graph: Map<string, GraphEdge[]>, from: string, to: string)
   return path;
 }
 
-// ----------------------------------
-// Nearest stop
-// ----------------------------------
-
 function nearestStop(stops: BusStop[], loc: [number, number]): BusStop {
   let best = stops[0];
   let bestDist = Infinity;
@@ -223,7 +190,7 @@ function nearestStop(stops: BusStop[], loc: [number, number]): BusStop {
 }
 
 // ----------------------------------
-// FLOW (Skyline core) + Generate routes (Step 6)
+// FLOW
 // ----------------------------------
 
 export type FlowEdge = {
@@ -236,7 +203,7 @@ export type FlowEdge = {
 const FLOW = new Map<string, FlowEdge>();
 
 function recordFlow(from: string, to: string, minute: number) {
-  const hour = Math.floor(((minute % 1440) + 1440) % 1440 / 60);
+  const hour = Math.floor((((minute % 1440) + 1440) % 1440) / 60);
   const key = `${from}→${to}`;
   let e = FLOW.get(key);
   if (!e) {
@@ -276,12 +243,7 @@ function pickColor(i: number) {
 
 export function generateRoutesFromFlow(stops: BusStop[], opts: GenerateOptions = {}): BusRoute[] {
   const stopById = new Map(stops.map(s => [s.id, s]));
-  const {
-    topEdges = 120,
-    minCount = 8,
-    maxRoutes = 8,
-    maxStopsPerRoute = 18,
-  } = opts;
+  const { topEdges = 120, minCount = 8, maxRoutes = 8, maxStopsPerRoute = 18 } = opts;
 
   const edges = getFlowEdges()
     .filter(e => e.count >= minCount && stopById.has(e.from) && stopById.has(e.to))
@@ -370,12 +332,13 @@ export function generateRoutesFromFlow(stops: BusStop[], opts: GenerateOptions =
 }
 
 // ----------------------------------
-// Step 7: Daily schedules (minimal, type-safe)
+// LIFE-LIKE AGENT MODEL (key fix)
 // ----------------------------------
 
 type Trip = {
-  depart: number; // minute of day
-  destination: [number, number];
+  depart: number;                 // minute of day
+  destination: [number, number];  // lat/lng
+  dwell: number;                  // minutes to stay
 };
 
 const DAY = 24 * 60;
@@ -384,47 +347,92 @@ function randInt(min: number, max: number) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
 
-function makeSchedule(agent: Agent): Trip[] {
+function pickOne<T>(arr: T[]): T | null {
+  return arr.length ? arr[Math.floor(Math.random() * arr.length)] : null;
+}
+
+function pickPoi(pois: POI[], types: POI['type'][]): POI | null {
+  const c = pois.filter(p => types.includes(p.type));
+  return pickOne(c);
+}
+
+function safeDest(p: [number, number]): [number, number] {
+  const c = clampToAstonBBox(p);
+  return inBoundary(c) ? c : c; // boundary is rectangular anyway; kept for future polygon
+}
+
+function makeDailySchedule(agent: Agent, pois: POI[], primary: POI | null): Trip[] {
   const home = agent.homeLocation;
-  const schedule: Trip[] = [];
+  const trips: Trip[] = [];
 
-  // Students
+  // Base: everyone might do 1–3 activities + return home, with dwell.
+  // Students: school + maybe shop/social
   if (agent.age < 18) {
-    schedule.push({ depart: 8 * 60 + randInt(-20, 30), destination: randomPointInAstonSafe() });
-    schedule.push({ depart: 15 * 60 + randInt(-15, 45), destination: home });
-  }
-  // Working adults (most)
-  else if (agent.age < 65 && Math.random() < 0.65) {
-    schedule.push({ depart: 7 * 60 + randInt(-40, 70), destination: randomPointInAstonSafe() }); // “work”
-    schedule.push({ depart: 17 * 60 + randInt(-20, 80), destination: home });
-    // occasional shopping after work
-    if (Math.random() < 0.25) {
-      schedule.splice(1, 0, { depart: 18 * 60 + randInt(0, 60), destination: randomPointInAstonSafe() });
-      schedule.push({ depart: 19 * 60 + randInt(0, 90), destination: home });
+    const school = primary ?? pickPoi(pois, ['education']);
+    if (school) {
+      trips.push({ depart: 8 * 60 + randInt(-25, 25), destination: safeDest(school.location), dwell: randInt(300, 420) });
     }
+    if (Math.random() < 0.35) {
+      const shop = pickPoi(pois, ['retail']);
+      if (shop) trips.push({ depart: 16 * 60 + randInt(-30, 40), destination: safeDest(shop.location), dwell: randInt(20, 60) });
+    }
+    trips.push({ depart: 17 * 60 + randInt(-10, 60), destination: home, dwell: randInt(600, 900) });
   }
-  // Others / retired
+  // Working adults
+  else if (agent.age < 65) {
+    const work = primary ?? pickPoi(pois, ['employment']);
+    if (work) {
+      trips.push({ depart: 7 * 60 + randInt(-45, 60), destination: safeDest(work.location), dwell: randInt(360, 540) });
+    }
+    if (Math.random() < 0.55) {
+      const shop = pickPoi(pois, ['retail']);
+      if (shop) trips.push({ depart: 18 * 60 + randInt(-15, 75), destination: safeDest(shop.location), dwell: randInt(20, 70) });
+    }
+    if (Math.random() < 0.35) {
+      const social = pickPoi(pois, ['social', 'leisure', 'religious']);
+      if (social) trips.push({ depart: 19 * 60 + randInt(0, 120), destination: safeDest(social.location), dwell: randInt(45, 150) });
+    }
+    trips.push({ depart: 20 * 60 + randInt(0, 180), destination: home, dwell: randInt(600, 900) });
+  }
+  // Seniors
   else {
-    if (Math.random() < 0.7) {
-      schedule.push({ depart: 11 * 60 + randInt(-30, 60), destination: randomPointInAstonSafe() });
-      schedule.push({ depart: 13 * 60 + randInt(0, 120), destination: home });
+    if (Math.random() < 0.65) {
+      const health = pickPoi(pois, ['healthcare']);
+      if (health) trips.push({ depart: 10 * 60 + randInt(-30, 90), destination: safeDest(health.location), dwell: randInt(30, 120) });
     }
+    if (Math.random() < 0.55) {
+      const social = pickPoi(pois, ['social', 'leisure', 'religious']);
+      if (social) trips.push({ depart: 13 * 60 + randInt(-10, 140), destination: safeDest(social.location), dwell: randInt(40, 160) });
+    }
+    if (Math.random() < 0.4) {
+      const shop = pickPoi(pois, ['retail']);
+      if (shop) trips.push({ depart: 16 * 60 + randInt(-20, 120), destination: safeDest(shop.location), dwell: randInt(15, 70) });
+    }
+    trips.push({ depart: 18 * 60 + randInt(0, 180), destination: home, dwell: randInt(700, 1000) });
   }
 
-  schedule.sort((a, b) => a.depart - b.depart);
-  return schedule;
+  // Ensure sorted and within day
+  trips.sort((a, b) => a.depart - b.depart);
+  return trips.map(t => ({ ...t, depart: Math.max(0, Math.min(DAY - 1, t.depart)) }));
 }
 
 // ----------------------------------
 // Agents
 // ----------------------------------
 
-export function createAgents(count: number): Agent[] {
+export function createAgents(count: number, pois: POI[], homeSampler: () => [number, number]): Agent[] {
   const agents: Agent[] = [];
+  const edu = pois.filter(p => p.type === 'education');
+  const emp = pois.filter(p => p.type === 'employment');
 
   for (let i = 0; i < count; i++) {
-    const home = randomPointInAstonSafe();
+    const home = safeDest(homeSampler());
     const age = Math.floor(Math.random() * 80) + 5;
+
+    // primary place: school/work anchor improves realism + repeated flow
+    let primary: POI | null = null;
+    if (age < 18) primary = pickOne(edu);
+    else if (age < 65 && Math.random() < 0.75) primary = pickOne(emp);
 
     const agent: Agent = {
       id: `agent_${i}`,
@@ -447,9 +455,10 @@ export function createAgents(count: number): Agent[] {
       currentRouteId: null,
     };
 
-    // Store schedule on the agent without touching your types
-    (agent as any)._daily = makeSchedule(agent);
+    (agent as any)._daily = makeDailySchedule(agent, pois, primary);
     (agent as any)._mode = 'idle';
+    (agent as any)._dwellLeft = 0;
+    (agent as any)._tripIndex = 0;
 
     agents.push(agent);
   }
@@ -458,8 +467,16 @@ export function createAgents(count: number): Agent[] {
 }
 
 // ----------------------------------
-// Simulation step (schedule-driven)
+// Simulation step
 // ----------------------------------
+
+function isValidLocation(loc: any): loc is [number, number] {
+  return Array.isArray(loc) && loc.length === 2 && Number.isFinite(loc[0]) && Number.isFinite(loc[1]);
+}
+
+function sanitizeStops(stops: BusStop[]) {
+  return stops.filter(s => s && s.id && isValidLocation((s as any).location));
+}
 
 export function stepSimulation(
   agents: Agent[],
@@ -470,7 +487,17 @@ export function stepSimulation(
 ) {
   if (!rawStops || rawStops.length < 2) return { agents, vehicles: [] };
 
-  const stops = sanitizeStops(rawStops);
+  const [south, west, north, east] = ASTON_BBOX;
+
+  const insideAstonBBox = (p: [number, number]) => {
+    const [lat, lng] = p;
+    return lat >= south && lat <= north && lng >= west && lng <= east;
+  };
+
+  const stops = sanitizeStops(rawStops)
+    .filter(s => insideAstonBBox(s.location))
+    .map(s => ({ ...s, location: clampToAstonBBox(s.location) }));
+
   if (stops.length < 2) return { agents, vehicles: [] };
 
   const graph = getGraph(stops);
@@ -479,11 +506,22 @@ export function stepSimulation(
   for (const agent of agents) {
     const a = agent as any;
     const daily: Trip[] = a._daily || [];
-    const idx: number = a._tripIndex ?? 0;
+    let idx: number = a._tripIndex ?? 0;
 
-    // If idle: only depart when schedule says so
+    agent.currentLocation = clampToAstonBBox(agent.currentLocation);
+
+    // dwell logic: if at destination, stay for a while
+    if (a._dwellLeft && a._dwellLeft > 0) {
+      a._dwellLeft -= 1;
+      agent.state = idx === 0 ? 'at_home' : 'at_destination';
+      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
+      continue;
+    }
+
+    // If idle: decide whether to depart
     if (!a._mode || a._mode === 'idle') {
       const next = daily[idx];
+
       if (!next) {
         agent.state = 'at_home';
         agent.targetLocation = null;
@@ -491,14 +529,12 @@ export function stepSimulation(
       }
 
       if (t < next.depart) {
-        // wait / dwell
         agent.state = idx === 0 ? 'at_home' : 'at_destination';
         agent.targetLocation = null;
         continue;
       }
 
-      // depart now
-      agent.targetLocation = next.destination;
+      agent.targetLocation = clampToAstonBBox(next.destination);
 
       const origin = nearestStop(stops, agent.currentLocation);
       const dest = nearestStop(stops, agent.targetLocation);
@@ -512,11 +548,10 @@ export function stepSimulation(
       agent.state = a._path ? 'riding' : 'walking_to_dest';
     }
 
-    // Transit (records flow)
+    // Transit
     if (a._mode === 'transit' && a._path) {
       const path = a._path as string[];
       if (a._pathIndex >= path.length - 1) {
-        // reached last stop → final walk to destination
         a._mode = 'walk_final';
         agent.state = 'walking_to_dest';
         continue;
@@ -525,13 +560,14 @@ export function stepSimulation(
       const fromId = path[a._pathIndex];
       const toId = path[a._pathIndex + 1];
       const toStop = stops.find(s => s.id === toId);
+
       if (!toStop) {
         a._mode = 'walk_direct';
         continue;
       }
 
       const m = moveToward(agent.currentLocation, toStop.location, TRANSIT_KM_PER_MIN);
-      agent.currentLocation = m.next;
+      agent.currentLocation = clampToAstonBBox(m.next);
       agent.ridingTime++;
       agent.distanceTraveled += m.movedKm;
       agent.carbonEmitted += (CARBON_FACTORS.bus_base_per_km * m.movedKm) / 1000;
@@ -540,43 +576,52 @@ export function stepSimulation(
       recordFlow(fromId, toId, minute);
 
       if (m.arrived) a._pathIndex++;
-      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime;
+      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
       continue;
     }
 
-    // Final walk after transit
+    // Final walk
     if (a._mode === 'walk_final' && agent.targetLocation) {
-      const m = moveToward(agent.currentLocation, agent.targetLocation, WALK_KM_PER_MIN);
-      agent.currentLocation = m.next;
+      const target = clampToAstonBBox(agent.targetLocation);
+      const m = moveToward(agent.currentLocation, target, WALK_KM_PER_MIN);
+      agent.currentLocation = clampToAstonBBox(m.next);
       agent.walkingTime++;
       agent.distanceTraveled += m.movedKm;
       agent.state = 'walking_to_dest';
 
       if (m.arrived) {
+        // reached destination: start dwell
+        const trip = daily[idx];
+        a._dwellLeft = trip?.dwell ?? randInt(30, 120);
         agent.targetLocation = null;
         a._mode = 'idle';
-        a._tripIndex = (a._tripIndex ?? 0) + 1;
+        a._tripIndex = idx + 1;
         agent.state = 'at_destination';
       }
-      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime;
+
+      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
       continue;
     }
 
-    // Direct walking fallback
+    // Direct walk fallback
     if (a._mode === 'walk_direct' && agent.targetLocation) {
-      const m = moveToward(agent.currentLocation, agent.targetLocation, WALK_KM_PER_MIN);
-      agent.currentLocation = m.next;
+      const target = clampToAstonBBox(agent.targetLocation);
+      const m = moveToward(agent.currentLocation, target, WALK_KM_PER_MIN);
+      agent.currentLocation = clampToAstonBBox(m.next);
       agent.walkingTime++;
       agent.distanceTraveled += m.movedKm;
       agent.state = 'walking_to_dest';
 
       if (m.arrived) {
+        const trip = daily[idx];
+        a._dwellLeft = trip?.dwell ?? randInt(30, 120);
         agent.targetLocation = null;
         a._mode = 'idle';
-        a._tripIndex = (a._tripIndex ?? 0) + 1;
+        a._tripIndex = idx + 1;
         agent.state = 'at_destination';
       }
-      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime;
+
+      agent.totalTimeSpent = agent.walkingTime + agent.ridingTime + agent.waitingTime;
       continue;
     }
   }
