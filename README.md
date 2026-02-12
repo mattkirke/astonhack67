@@ -1,4 +1,2 @@
 # Welcome to your project
-
-
-- 
+A project to see how transportation can be improved in the aston area by scheduling autonomous agents to mimic epple who lice in aston (based of cencus data) to find more effectient and optimal travel routes. 
