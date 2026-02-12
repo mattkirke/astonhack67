@@ -1,2 +1,18 @@
 # Welcome to your project
-A project to see how transportation can be improved in the aston area by scheduling autonomous agents to mimic epple who lice in aston (based of cencus data) to find more effectient and optimal travel routes. 
+A project built during AstonHack 67 that explores how autonomous agents can improve transportation efficiency in the Aston area. The system uses census-like travel data to simulate and optimise routes for individual travellers.
+
+
+# Clone the repo
+git clone https://github.com/mattkirke/astonhack67.git
+cd astonhack67
+
+# Frontend
+cd public
+npm install
+npm run dev
+
+# Backend
+cd ../backend
+pip install -r requirements.txt
+Check api status (make sure .env is present with api connection info)
+Run backend in seperare terminal. 
